@@ -1,0 +1,466 @@
+---
+title: "Energy Consumption Project"
+author: "Shadi Farzankia - Mina Aminpour - Zoha Karimzadeh"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+This project investigates electricity consumption and renewable energy generation patterns in Germany using hourly time-series data. We explore how solar and wind energy production, electricity demand, and temperature vary across time and geography.
+
+By integrating energy data from **ENTSO-E** and weather data from the German Meteorological Service (**DWD**), we conduct visual and statistical analyses to understand:
+
+- Temporal and seasonal patterns in renewable production and demand
+- Forecast accuracy of electricity loads
+
+- Relationship between temperature and consumption behavior
+
+
+# Packages Used
+We used the following R packages throughout the project for data wrangling, visualization, and geospatial mapping:
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(lubridate)
+library(slider)
+library(forcats)
+library(rnaturalearth)
+library(sf)
+library(plotly)
+library(viridisLite)
+library(viridis)
+```
+These packages enabled robust preprocessing, time-based feature extraction, rolling averages, geospatial visualizations, and interactive graphics, all of which were integral to our analysis.
+
+# Dataset Used
+We used two primary data sources for our analysis, covering the years 2014 to 2020. The first is the ENTSO-E dataset, which provides time series data on electricity consumption across various European countries. The second is the DWD weather dataset, offering hourly temperature records for several German cities. In the sections below, we provide a detailed description of each dataset.
+
+### European Network of Transmission System Operators for Electricity (ENTSO-E)
+The ENTSO-E Time Series Dataset is commonly used in electricity market and power systems analysis. It typically contains hourly time series data from the European Network of Transmission System Operators for Electricity (ENTSO-E). This dataset contains the following key data fields:
+
+```{r, message=FALSE, warning=FALSE}
+df <- read_csv("time_series_60min_singleindex.csv") %>%
+  mutate(timestamp = ymd_hms(utc_timestamp))
+knitr::kable(head(df, 10))
+```
+Each field is typically labeled using a standard naming convention, such as 'DE_load_actual_entsoe_transparency' or 'FR_solar_generation_actual', where the prefix represents the country.
+
+### Deutscher Wetterdienst (DWD)
+The DWD dataset refers to meteorological data provided by the Deutscher Wetterdienst (DWD) — the German National Meteorological Service. It offers a wide range of weather and climate data for Germany, and it's commonly used in energy modeling, climate research, agriculture, hydrology, and environmental monitoring. For this analysis, we used hourly meteorological data from five major German cities: **Berlin**, **Frankfurt**, **Munich**, **Cologne**, and **Hamburg**.
+ This dataset contains the informations such as:
+
+  - **timestamp_iso**: ISO 8601 timestamp in local time with hourly resolution. Format: YYYY-MM-DD HH:MM:SS.
+  - **STATIONS_ID**: Numeric station ID assigned by DWD. 1975 corresponds to a weather station in Hamburg.
+  - **QN_9**: Quality level of the measurement (DWD code, typically 3 = validated data).
+  - **TT_TU**: Air temperature at 2 meters above ground in Celsius (C).
+  - **RF_TU**: Relative humidity at 2 meters in \%.
+
+```{r,echo=FALSE, warning=FALSE}
+read_temp <- function(file, city_col_name) {
+  read_delim(file, delim = ";", locale = locale(encoding = "Latin1"), trim_ws = TRUE, show_col_types = FALSE) %>%
+    transmute(
+      timestamp = ymd_h(MESS_DATUM),
+      !!sym(city_col_name) := TT_TU
+    )
+}
+
+
+# Read each city's file (after unzipping)
+berlin     <- read_temp("data/germany weather/imputed_berlin_weather.csv", "berlin_temp")
+hamburg    <- read_temp("data/germany weather/imputed_hamburg_weather.csv", "hamburg_temp")
+munich     <- read_temp("data/germany weather/imputed_munich_weather.csv", "munich_temp")
+cologne    <- read_temp("data/germany weather/imputed_cologne_weather.csv", "cologne_temp")
+frankfurt  <- read_temp("data/germany weather/imputed_frankfort_weather.csv", "frankfurt_temp")
+
+# Merge on timestamp
+df_temp <- reduce(list(berlin, hamburg, munich, cologne, frankfurt), full_join, by = "timestamp")
+df_temp <- df_temp %>%
+  mutate(temp_avg = round(rowMeans(select(., ends_with("_temp")), na.rm = TRUE), 2))
+
+#=========================#
+# Merge Weather + Demand
+#=========================#
+df_joined <- left_join(df_temp, df, by = c("timestamp" = "utc_timestamp"))
+
+knitr::kable(head(df_temp, 10))
+```
+ 
+# Data Preprocessing
+To ensure the quality, consistency, and readiness of the data for analysis, we applied a comprehensive preprocessing pipeline to both the electricity time series dataset and the weather dataset. This step was crucial for enabling accurate temporal comparisons and robust visualizations. The following preprocessing actions were carried out:
+
+1. **Temperature Data Cleaning (Weather Dataset)**
+  - In the raw weather data, missing temperature values were encoded as -999 or they were completely missing.
+  - These placeholder values (-999) and missing values were replaced with the mean temperature for that specific city to preserve daily averages without introducing artificial bias.
+
+
+2. **Electricity Data Cleaning (Load & Generation)**
+  - Several electricity variables (e.g., actual load, solar and wind generation) had missing values.
+  - We imputed these missing values using the mean of each respective variable, ensuring continuity in time series computations such as rolling averages and totals.
+
+
+# Analytical Questions
+In the sections below, we address the key analytical questions through a series of data visualizations. Each plot is designed to highlight specific patterns, trends, or relationships within the electricity and weather datasets.
+
+## 1. How Does Average Electricity Load Vary Across European Countries?
+The choropleth map below visualizes the average electricity load (in megawatts) across European countries. The values were aggregated over the full time period and mapped using color intensity:
+
+  - Brighter colors (yellow) indicate higher average electricity demand.
+  - Darker shades (blue/purple) indicate lower average demand.
+
+
+
+```{r, echo=FALSE, warning=FALSE}
+# Step 1: Extract load columns for each country
+load_cols <- grep("_load_actual_entsoe_transparency$", names(df), value = TRUE)
+
+# Step 2: Reshape to long format
+df_long <- df %>%
+  select(all_of(load_cols)) %>%
+  mutate(timestamp = ymd_hms(df$utc_timestamp)) %>%
+  pivot_longer(cols = all_of(load_cols), 
+               names_to = "country",
+               values_to = "load") %>%
+  mutate(country = gsub("_load_actual_entsoe_transparency", "", country)) %>%
+  filter(!is.na(load))
+
+# Step 3: Compute average load per country
+df_avg <- df_long %>%
+  group_by(country) %>%
+  summarise(avg_load = mean(load, na.rm = TRUE), .groups = "drop")
+
+# Step 4: Load spatial data with country shapes and population
+world <- ne_countries(scale = "medium", returnclass = "sf")
+
+# Step 5: Prepare country codes
+df_avg$iso_a2 <- toupper(df_avg$country)
+
+# Step 6: Merge average load with spatial data (adds population from `pop_est`)
+world_map <- left_join(world, df_avg, by = c("iso_a2"))
+
+# Step 7: Create plot with population in tooltip
+p <- ggplot(world_map) +
+  geom_sf(aes(fill = avg_load,
+              text = paste0(
+                "Country: ", name, "\n",
+                "Average Load: ", round(avg_load, 0), " MW\n",
+                "Population: ", formatC(pop_est, format = "d", big.mark = ",")
+              ))) +
+  scale_fill_viridis_c(option = "plasma", na.value = "lightgray") +
+  labs(title = "Average Electricity Load by Country",
+       fill = "MW") +
+  theme_minimal()
+
+# Step 8: Make it interactive
+ggplotly(p, tooltip = "text")
+
+```
+
+
+### Interpretation
+- Germany stands out with the highest average load, exceeding 50,000 MW, shown in bright yellow. This reflects its large population, industrial base, and role as a central energy consumer in Europe.
+- France, Italy, and Spain also show relatively high demand (orange/pink tones), indicating their significant energy usage.
+- Eastern European and Balkan countries generally show moderate to low average loads (purple/blue), likely due to smaller populations, lower industrial demand, or different energy consumption patterns.
+- Some Nordic and Baltic states show lower load levels despite cold climates—possibly due to energy efficiency measures, lower population, or alternative heating methods.
+- Overall, western European countries (e.g., Germany, France) have higher average loads, aligning with their economic size and energy-intensive industries.
+- In contrast, Central and Eastern Europe shows lower average demand, possibly reflecting different energy infrastructures or economic scales.
+
+Figure 1 provides a continental overview, highlighting Germany's leading role in electricity consumption — a key motivation for our deeper analysis of German energy flow and renewable integration in the sections that follow.
+
+## 2. How have solar and wind energy generation evolved annually in Germany and France?
+ We now shift our focus to Germany and France, comparing their yearly renewable energy production. The chart below illustrates the total annual electricity generation (in megawatts, MW) from solar and onshore wind sources for Germany and France between 2014 and 2020.
+
+```{r, echo=FALSE, warning=FALSE, fig.width=15, fig.height=5}
+df %>%
+  select(timestamp, DE_solar_generation_actual, DE_wind_onshore_generation_actual,
+         FR_solar_generation_actual, FR_wind_onshore_generation_actual) %>%
+  pivot_longer(-timestamp, names_to = "source", values_to = "generation") %>%
+  mutate(
+    year = lubridate::year(timestamp),
+    country = case_when(
+      str_starts(source, "DE") ~ "Germany",
+      str_starts(source, "FR") ~ "France"
+    )
+  ) %>%
+  group_by(country, source, year) %>%
+  summarise(total_gen = sum(generation, na.rm = TRUE), .groups = "drop") %>%
+  ggplot(aes(x = year, y = total_gen, fill = source)) +
+  geom_col(position = "dodge") +
+  facet_wrap(~ country) +  # no 'scales = "free_y"' -> shared y-axis
+  labs(title = "Yearly Energy Production Trends (Germany & France)",
+       x = "Year", y = "Total Generation (MW)", fill = "Source") +
+  theme_minimal()
+```
+
+### Interpretation
+
+- This plot demonstrates how Germany leads in renewable energy production in the region.
+- Wind energy is the most important contributor in both countries, but its scale in Germany is substantially higher.
+- Solar energy contributes less overall but shows consistent year-over-year growth. 
+- These trends are vital for informing energy policy, infrastructure planning, and climate action strategies.
+
+
+### Germany
+- Wind energy is the dominant renewable source, showing a strong upward trend from 2014 to 2020 and peaking in 2019.
+- Solar energy displays consistent and moderate growth across all years.
+- Both sources slightly declined in 2020, which may reflect changes in weather, capacity, or operational conditions.
+
+### France
+- Wind energy has steadily increased, though at a lower absolute level than in Germany.
+- Solar energy remains modest and shows only minor growth from 2015 to 2020.
+
+
+## 3. What are the temporal patterns in Germany’s Weakly solar and wind output?
+This line chart displays the 7-day rolling average of solar and onshore wind electricity generation in Germany from 2014 to 2020. By smoothing daily fluctuations, the chart highlights long-term seasonal and interannual patterns in renewable output.
+
+```{r, echo=FALSE, warning=FALSE, fig.width=15, fig.height=5}
+df %>%
+  select(timestamp, DE_solar_generation_actual, DE_wind_onshore_generation_actual) %>%
+  pivot_longer(-timestamp, names_to = "source", values_to = "generation") %>%
+  mutate(date = as_date(timestamp)) %>%
+  group_by(source, date) %>%
+  summarise(daily_gen = sum(generation, na.rm = TRUE), .groups = "drop") %>%
+  group_by(source) %>%
+  mutate(rolling_avg = slide_dbl(daily_gen, mean, .before = 6, .complete = TRUE)) %>%
+  ggplot(aes(x = date, y = rolling_avg, color = source)) +
+  geom_line(alpha = 0.9) +
+  scale_y_continuous(limits = c(0, 1e6)) +  # adjust this limit as needed
+  scale_color_manual(values = c(
+    "DE_solar_generation_actual" = "orange",
+    "DE_wind_onshore_generation_actual" = "steelblue"
+  )) +
+  labs(
+    title = "Smoothed Weekly Solar and Wind Generation in Germany",
+    y = "7-Day Rolling Average Generation (MW)",
+    x = "Date",
+    color = "Source"
+  ) +
+  theme_minimal()
+
+```
+
+### Interpretation
+- The combination of both helps balance renewable supply across seasons, mitigating the intermittency of each individual source.
+- Solar is cyclical and stable → reliable for forecasting.
+- Wind is erratic but powerful → useful for high-capacity contributions.
+
+
+### Solar Generation
+Displays a clear and consistent seasonal cycle:
+
+- Peaks around May to August each year (summer).
+- Drops to near-zero values in winter (November to January).
+- The pattern is highly predictable due to the natural solar cycle.
+- Shows a gradual upward trend over the years, likely reflecting growing installed capacity and improved efficiency.
+
+
+### Wind Generation
+
+- Exhibits high short-term variability with frequent spikes and dips.
+- Slight tendency for higher output during late autumn and winter months.
+- More irregular compared to solar, likely due to fluctuating wind conditions.
+- Overall, wind generation shows growth in variability and output over time, especially from 2018 onwards.
+- The increased variability and rising peaks in wind output suggest expanded wind capacity or better harnessing of wind resources in recent years.
+
+
+## 4. How does Germany’s total renewable energy production compare to its electricity consumption over time?
+The plot below shows a stacked area chart of Germany’s annual electricity generation from solar and onshore wind, compared against the total electricity consumption, represented by the black dashed line, from 2014 to 2020.
+
+```{r,echo=FALSE, warning=FALSE}
+df_summary <- df %>%
+  mutate(year = year(timestamp)) %>%
+  group_by(year) %>%
+  summarise(
+    Solar = sum(DE_solar_generation_actual, na.rm = TRUE),
+    Wind = sum(DE_wind_onshore_generation_actual, na.rm = TRUE),
+    Consumption = sum(DE_load_actual_entsoe_transparency, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+gen_long <- df_summary %>%
+  pivot_longer(cols = c(Solar, Wind), names_to = "Source", values_to = "Value")
+
+ggplot() +
+  geom_area(data = gen_long, aes(x = year, y = Value, fill = Source), alpha = 0.9, color = "white", size = 0.2) +
+  geom_line(data = df_summary, aes(x = year, y = Consumption), linetype = "dashed", size = 1.2) +
+  scale_fill_manual(values = c("Solar" = "#002F6C", "Wind" = "#69C6F0")) +
+  labs(title = "Germany: Renewable Energy Generation vs. Total Consumption",
+       x = NULL, y = "Total Energy (MWh)", fill = NULL) +
+  theme_minimal(base_size = 14)
+```
+
+### Interpretation
+- Wind energy (light blue area) contributes the majority of renewable generation, showing a gradual upward trend from 2015 to 2019.
+- Solar energy (dark blue area) also increases steadily, but at a lower absolute scale than wind.
+- Total consumption (dashed line) remains relatively flat across most years, with a noticeable decline in 2020, likely related to the COVID-19 pandemic’s economic effects.
+- Despite growth in renewables, total generation from solar and wind remains significantly below total consumption, leaving a visible gap.
+
+
+## 5. How Does Electricity Demand in Germany Vary by Hour of the Day and Month of the Year?
+
+### 5.1 Hour of the Day
+The boxplot below illustrates the distribution of electricity demand (in megawatts) for each hour of the day in Germany, aggregated across all days in the dataset. Each box represents the range and central tendency of load values for a specific hour.
+
+```{r,echo=FALSE, warning=FALSE}
+df %>%
+  mutate(hour = hour(timestamp)) %>%
+  ggplot(aes(x = factor(hour), y = DE_load_actual_entsoe_transparency)) +
+  geom_boxplot(outlier.alpha = 0.2, fill = "skyblue") +
+  labs(title = "Germany: Hourly Load Distribution by Hour of Day", x = "Hour of Day", y = "Load (MW)")
+
+```
+
+### Interpretation
+- Demand rises sharply starting around 5:00 AM, reflecting the beginning of daily activities.
+- Load reaches its peak between 8:00 AM and 2:00 PM, consistent with typical business and industrial operations.
+- After 2:00 PM, demand gradually declines, with a steady drop from 6:00 PM onward.
+- The lowest electricity demand consistently occurs between midnight and 5:00 AM, corresponding to nighttime inactivity.
+- The interquartile range (box height) is widest during the midday hours, indicating greater variability in daytime electricity use.
+- Outliers are more common in early morning and late evening, possibly due to unusual load spikes or drops.
+
+### 5.2 Month of the Year
+This heatmap in displays the average hourly electricity load (in megawatts) across each month in Germany. The color gradient represents the intensity of demand, with darker purples indicating lower demand and bright yellows indicating higher demand. The x-axis corresponds to the hour of the day, and the y-axis represents the month of the year.
+
+```{r,echo=FALSE, warning=FALSE}
+df %>%
+  mutate(hour = hour(timestamp), month = month(timestamp, label = TRUE)) %>%
+  filter(!is.na(DE_load_actual_entsoe_transparency)) %>%
+  group_by(month, hour) %>%
+  summarise(mean_load = mean(DE_load_actual_entsoe_transparency), .groups = "drop") %>%
+  ggplot(aes(x = hour, y = fct_rev(month), fill = mean_load)) +
+  geom_tile(color = "white") +
+  scale_fill_viridis_c(option = "C") +
+  labs(title = "Germany: Average Load by Hour and Month", x = "Hour of Day", y = "Month") +
+  theme_minimal(base_size = 14)
+```
+
+### Interpretation
+- Winter months (January, November, December) exhibit the highest overall demand, especially between 8:00 AM and 6:00 PM.
+- Summer months (June, July, August) show lower average loads, particularly during night hours.
+- Higher loads in winter suggest increased electricity use for heating, lighting, and possibly industrial activities, while summer demand is lower, possibly due to longer daylight hours and reduced heating needs.
+
+
+### 6. How accurate are load forecasts compared to actual demand?
+
+This scatter plot compares the forecasted electricity load with the actual measured load in Germany. Each point represents one hourly observation. The black dashed line is the ideal 1:1 line, where forecast and actual values would match exactly.
+
+```{r,echo=FALSE, warning=FALSE}
+# Add year column to the data
+df <- df %>%
+  mutate(year = year(timestamp))
+
+# Create a color palette based on unique years
+years <- sort(unique(df$year))
+palette <- viridis(length(years))
+
+# 3D Scatter Plot
+plot_ly(
+  data = df,
+  x = ~year,  # X = Year
+  y = ~DE_load_actual_entsoe_transparency,  # Y = Actual load
+  z = ~DE_load_forecast_entsoe_transparency,  # Z = Forecasted load
+  color = ~factor(year),
+  colors = palette,
+  type = "scatter3d",
+  mode = "markers",
+  marker = list(size = 2, opacity = 0.5)
+) %>%
+  layout(
+    title = "Germany: Year vs Actual Load vs Forecasted Load",
+    scene = list(
+      xaxis = list(title = "Year"),
+      yaxis = list(title = "Actual Load (MW)"),
+      zaxis = list(title = "Forecasted Load (MW)")
+    )
+  )
+
+```
+
+
+
+### Interpretation
+
+- Most points lie closely along the diagonal line, indicating a strong agreement between forecasted and actual load.
+- The tight, dense cluster of points around the 1:1 line suggests that the forecasting model used is highly accurate across a broad range of load values.
+- Deviations become slightly larger at very high and very low load values, suggesting some forecast error during extreme demand conditions.
+- No major signs of systematic over- or underestimation—the deviations appear random and balanced, which is a good indication of unbiased forecasting.
+
+
+
+## 7. What is the relationship between temperature and electricity demand in Germany, and how is it affected by extreme values?
+
+This scatter plot visualizes the relationship between daily average temperature (°C) and total electricity demand (GWh/day) in Germany. Each point represents a daily observation. The blue line indicates a linear regression trend fitted across the full data range.
+
+```{r echo=FALSE, warning=FALSE, fig.width=15, fig.height=5}
+
+
+# Create a clean, local copy of the original data
+df_daily_plot <- df_joined %>%
+  mutate(date = as.Date(timestamp)) %>%
+  group_by(date) %>%
+  summarise(
+    temp = mean(temp_avg, na.rm = TRUE),
+    demand = sum(DE_load_actual_entsoe_transparency, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(model_pred = predict(lm(demand ~ temp, data = .)))
+
+# Plot 1: full data
+p1 <- ggplot(df_daily_plot, aes(x = temp)) +
+  geom_point(aes(y = demand), color = "black", size = 1.5, alpha = 0.8) +
+  geom_point(aes(y = model_pred), color = "blue", size = 1.5, alpha = 0.7) +
+  labs(title = "Demand vs Temperature (Daily)",
+       x = "Temperature", y = "Demand (GWh/d)") +
+  theme_minimal(base_size = 14)
+
+# Plot 2: filtered data
+df_daily_filtered <- df_daily_plot %>%
+  filter(demand < 7.5e7)
+
+p1 
+```
+
+### Interpretation
+
+There is a clear negative correlation between temperature and electricity demand:
+
+- Colder days (left side of the plot, below 10°C) are generally associated with higher electricity usage.
+- Warmer days (right side of the plot) correspond to lower demand, particularly above ~15°C.
+- The trend line confirms this pattern, sloping downward, indicating that as temperature increases, average demand decreases.
+- Some high-demand outliers occur even at moderate temperatures, possibly reflecting exceptional days (e.g., holidays, industrial activity, or anomalies in data reporting)
+
+# Conclusion
+This project provided a comprehensive visualization-based analysis of electricity demand and renewable energy generation in Germany between 2014 and 2020, integrating both meteorological and energy datasets. Key findings include:
+
+- Temporal Patterns: Solar energy showed strong seasonal cycles, peaking in summer, while wind energy exhibited irregular fluctuations with increased output during colder months.
+- Electricity Demand Trends: Demand followed daily and seasonal rhythms—rising during working hours and winter months, and dropping at night and in summer.
+- Forecast Accuracy: Forecasted electricity loads closely matched actual loads, demonstrating strong model reliability with only minor deviations during extreme load conditions.
+ - Temperature-Demand Relationship: A clear negative correlation exists between temperature and electricity demand—colder days correspond to higher usage, confirming heating demand impacts.
+- Renewables vs Consumption: While renewable generation (especially wind) increased significantly, it still fell short of covering total national electricity consumption, underlining the need for continued expansion and integration.
+
+
+# Limitations
+Despite the thorough visual and statistical analysis, this study has several limitations:
+
+- **Missing and Imputed Data**: Both temperature and electricity datasets contained missing values. Imputation using mean values may smooth out true variability, especially during extreme weather or demand events.
+
+- **Geographic Aggregation**: Renewable generation and demand were analyzed at the national level. Local-level disparities and transmission bottlenecks were not accounted for.
+
+- **Renewable Scope**: The analysis only included solar and onshore wind generation. Other important sources such as hydro, biomass, and offshore wind were excluded.
+
+- **Temporal Range**: The dataset ends in 2020, missing recent developments in the energy sector, especially those related to post-COVID demand recovery and geopolitical energy shifts.
+
+- **Forecast Model Transparency**: While forecast accuracy was assessed, the underlying forecasting methodology (used by ENTSO-E) is not examined in detail.
+
+
+# References
+
+- [ENTSO-E Electricity Time](https://data.open-power-system-data.org/time_series/)
+
+- [EDeutscher Wetterdienst (DWD)](https://www.entsoe.eu/data/)
+
+
+
