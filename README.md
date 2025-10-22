@@ -190,7 +190,8 @@ Each point represents a single day, with the blue line showing a fitted linear r
 
  
 ---
-➡️ For full plots and code, see [`final_report_visualization.Rmd`](./final_report_visualization.Rmd) or [the rendered PDF](./final_report_visualization.pdf).
+➡️ For full plots and code, see [`final_report_visualization.Rmd`](reports/Project_Markdown.Rmd) or [the report PDF](reports/final_report_visualzation.pdf).
+
 ---
 
 **Authors:** Shadi Farzankia, Mina Aminpour, Zoha Karimzadeh  
